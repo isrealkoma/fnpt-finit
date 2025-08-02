@@ -5,7 +5,7 @@ const axios = require("axios");
 const fs = require("fs");
 const ffmpeg = require("fluent-ffmpeg");
 const path = require("path");
-require("dotenv").config();
+//require("dotenv").config();
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));

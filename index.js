@@ -5,7 +5,7 @@ const axios = require("axios");
 const fs = require("fs");
 const ffmpeg = require("fluent-ffmpeg");
 const path = require("path");
-const OpenAI = require("openai");
+require("dotenv").config();
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
@@ -17,11 +17,7 @@ const users = {
   "+256700000003": { pin: "1111", balance: 120000, loan: 20000 }
 };
 
-// OpenAI setup
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
-
+// Helper: extract intent
 function extractIntent(message) {
   const lowered = message.toLowerCase();
   if (lowered.includes("balance")) return "balance";
@@ -30,6 +26,7 @@ function extractIntent(message) {
   return "chat";
 }
 
+// WhatsApp webhook handler
 app.post("/whatsapp", async (req, res) => {
   const from = req.body.From.replace("whatsapp:", "");
   const incomingMsg = req.body.Body;
@@ -47,7 +44,6 @@ app.post("/whatsapp", async (req, res) => {
 
       console.log("Audio saved as voice.ogg");
 
-      // Convert OGG to WAV using ffmpeg
       await new Promise((resolve, reject) => {
         ffmpeg(oggPath)
           .toFormat("wav")
@@ -62,13 +58,8 @@ app.post("/whatsapp", async (req, res) => {
           .save(wavPath);
       });
 
-      // Transcribe audio with OpenAI Whisper
-      console.log("Transcribing with Whisper...");
-      const whisperResponse = await openai.audio.transcriptions.create({
-        file: fs.createReadStream(wavPath),
-        model: "whisper-1",
-      });
-      finalText = whisperResponse.text;
+      msg.body("Sorry, audio transcription is not supported with Groq yet.");
+      return res.type("text/xml").send(twiml.toString());
     }
 
     const user = users[from];
@@ -100,11 +91,17 @@ app.post("/whatsapp", async (req, res) => {
           }
           break;
         default:
-          const chatResponse = await openai.chat.completions.create({
-            model: "gpt-4",
+          const groqResponse = await axios.post("https://api.groq.com/openai/v1/chat/completions", {
+            model: "mixtral-8x7b-32768", // or "llama3-70b-8192"
             messages: [{ role: "user", content: finalText }],
+          }, {
+            headers: {
+              "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
+              "Content-Type": "application/json"
+            }
           });
-          msg.body(chatResponse.choices[0].message.content);
+
+          msg.body(groqResponse.data.choices[0].message.content);
           break;
       }
     }
@@ -112,10 +109,11 @@ app.post("/whatsapp", async (req, res) => {
     res.type("text/xml").send(twiml.toString());
   } catch (error) {
     console.error("Error:", error.message);
-    msg.body("Sorry, an error occurred processing your message.");
+    msg.body("Sorry, something went wrong.");
     res.type("text/xml").send(twiml.toString());
   }
 });
 
+// Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));

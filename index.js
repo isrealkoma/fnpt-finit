@@ -3,19 +3,17 @@ const bodyParser = require("body-parser");
 const { MessagingResponse } = require("twilio").twiml;
 const axios = require("axios");
 const fs = require("fs");
-const FormData = require("form-data");
 const ffmpeg = require("fluent-ffmpeg");
 const path = require("path");
-const { Configuration, OpenAIApi } = require("openai");
+const OpenAI = require("openai");
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 
-// OpenAI setup
-const configuration = new Configuration({
- apiKey: process.env.OPENAI_API_KEY, // Add your OpenAI API key
+// OpenAI v4 setup
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY, // Put your API key in .env file or environment
 });
-const openai = new OpenAIApi(configuration);
 
 // Intent extractor
 function extractIntent(message) {
@@ -52,16 +50,13 @@ app.post("/whatsapp", async (req, res) => {
           .save(wavPath);
       });
 
-      // Send to OpenAI Whisper
-      const formData = new FormData();
-      formData.append("file", fs.createReadStream(wavPath));
-      formData.append("model", "whisper-1");
-
-      const whisperResponse = await openai.createTranscription(formData.getBuffer(), "whisper-1", undefined, {
-        headers: formData.getHeaders(),
+      // Transcribe audio with OpenAI Whisper
+      const whisperResponse = await openai.audio.transcriptions.create({
+        file: fs.createReadStream(wavPath),
+        model: "whisper-1",
       });
 
-      finalText = whisperResponse.data.text;
+      finalText = whisperResponse.text;
     }
 
     const intent = extractIntent(finalText);
@@ -77,11 +72,11 @@ app.post("/whatsapp", async (req, res) => {
         msg.body("To apply for a loan, reply with the amount and purpose (e.g., 'Loan 50000 for school fees').");
         break;
       default:
-        const chatResponse = await openai.createChatCompletion({
+        const chatResponse = await openai.chat.completions.create({
           model: "gpt-4",
           messages: [{ role: "user", content: finalText }],
         });
-        msg.body(chatResponse.data.choices[0].message.content);
+        msg.body(chatResponse.choices[0].message.content);
         break;
     }
 

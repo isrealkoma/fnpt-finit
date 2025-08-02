@@ -45,14 +45,25 @@ app.post("/whatsapp", async (req, res) => {
       const audioResponse = await axios.get(mediaUrl, { responseType: "arraybuffer" });
       fs.writeFileSync(oggPath, audioResponse.data);
 
+      console.log("Audio saved as voice.ogg");
+
+      // Convert OGG to WAV using ffmpeg
       await new Promise((resolve, reject) => {
         ffmpeg(oggPath)
           .toFormat("wav")
-          .on("error", reject)
-          .on("end", resolve)
+          .on("error", (err) => {
+            console.error("FFmpeg error:", err.message);
+            reject(err);
+          })
+          .on("end", () => {
+            console.log("Audio converted to WAV successfully");
+            resolve();
+          })
           .save(wavPath);
       });
 
+      // Transcribe audio with OpenAI Whisper
+      console.log("Transcribing with Whisper...");
       const whisperResponse = await openai.audio.transcriptions.create({
         file: fs.createReadStream(wavPath),
         model: "whisper-1",

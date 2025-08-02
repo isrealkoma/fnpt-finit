@@ -12,7 +12,7 @@ app.use(bodyParser.urlencoded({ extended: false }));
 
 // Dummy users
 const users = {
-  "+25677188410": { pin: "1234", balance: 234000, loan: 0 },
+  "+256771880410": { pin: "1234", balance: 234000, loan: 0 },
   "+256706025524": { pin: "4321", balance: 50000, loan: 10000 },
   "+256700000003": { pin: "1111", balance: 120000, loan: 20000 }
 };

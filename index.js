@@ -10,12 +10,18 @@ const OpenAI = require("openai");
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 
-// OpenAI v4 setup
+// Dummy users
+const users = {
+  "+25677188410": { pin: "1234", balance: 234000, loan: 0 },
+  "+256706025524": { pin: "4321", balance: 50000, loan: 10000 },
+  "+256700000003": { pin: "1111", balance: 120000, loan: 20000 }
+};
+
+// OpenAI setup
 const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY, // Put your API key in .env file or environment
+  apiKey: process.env.OPENAI_API_KEY,
 });
 
-// Intent extractor
 function extractIntent(message) {
   const lowered = message.toLowerCase();
   if (lowered.includes("balance")) return "balance";
@@ -24,24 +30,21 @@ function extractIntent(message) {
   return "chat";
 }
 
-// WhatsApp webhook route
 app.post("/whatsapp", async (req, res) => {
+  const from = req.body.From.replace("whatsapp:", "");
   const incomingMsg = req.body.Body;
   const mediaUrl = req.body.MediaUrl0;
   const twiml = new MessagingResponse();
   const msg = twiml.message();
-
   let finalText = incomingMsg;
 
   try {
     if (mediaUrl) {
       const oggPath = path.join(__dirname, "voice.ogg");
       const wavPath = path.join(__dirname, "voice.wav");
-
       const audioResponse = await axios.get(mediaUrl, { responseType: "arraybuffer" });
       fs.writeFileSync(oggPath, audioResponse.data);
 
-      // Convert OGG to WAV using ffmpeg
       await new Promise((resolve, reject) => {
         ffmpeg(oggPath)
           .toFormat("wav")
@@ -50,34 +53,49 @@ app.post("/whatsapp", async (req, res) => {
           .save(wavPath);
       });
 
-      // Transcribe audio with OpenAI Whisper
       const whisperResponse = await openai.audio.transcriptions.create({
         file: fs.createReadStream(wavPath),
         model: "whisper-1",
       });
-
       finalText = whisperResponse.text;
     }
 
-    const intent = extractIntent(finalText);
+    const user = users[from];
+    if (!user) {
+      msg.body("You are not registered in the system.");
+    } else {
+      const intent = extractIntent(finalText);
 
-    switch (intent) {
-      case "balance":
-        msg.body("Your current balance is UGX 234,000.");
-        break;
-      case "transfer":
-        msg.body("To transfer funds, please reply with: Send [amount] to [recipient name].");
-        break;
-      case "loan":
-        msg.body("To apply for a loan, reply with the amount and purpose (e.g., 'Loan 50000 for school fees').");
-        break;
-      default:
-        const chatResponse = await openai.chat.completions.create({
-          model: "gpt-4",
-          messages: [{ role: "user", content: finalText }],
-        });
-        msg.body(chatResponse.choices[0].message.content);
-        break;
+      switch (intent) {
+        case "balance":
+          if (finalText.includes(user.pin)) {
+            msg.body(`Your current balance is UGX ${user.balance.toLocaleString()}.`);
+          } else {
+            msg.body("Please provide your PIN to check balance.");
+          }
+          break;
+        case "transfer":
+          if (!finalText.includes(user.pin)) {
+            msg.body("To transfer funds, include your PIN in the message (e.g., Send 5000 to John 1234).");
+          } else {
+            msg.body("Transfer request received. (Dummy logic: transfer not actually performed.)");
+          }
+          break;
+        case "loan":
+          if (!finalText.includes(user.pin)) {
+            msg.body("To request a loan, include your PIN (e.g., Loan 100000 for business 1234).");
+          } else {
+            msg.body("Loan request received. (Dummy logic: loan not actually processed.)");
+          }
+          break;
+        default:
+          const chatResponse = await openai.chat.completions.create({
+            model: "gpt-4",
+            messages: [{ role: "user", content: finalText }],
+          });
+          msg.body(chatResponse.choices[0].message.content);
+          break;
+      }
     }
 
     res.type("text/xml").send(twiml.toString());
@@ -88,6 +106,5 @@ app.post("/whatsapp", async (req, res) => {
   }
 });
 
-// Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));

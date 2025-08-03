@@ -14,7 +14,7 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const sendWhatsapp = async (phone, text) => {
   try {
     await axios.post(
-      'https://graph.facebook.com/v19.0/me/messages',
+      'https://graph.facebook.com/v19.0/<PHONE_NUMBER_ID>/messages',
       {
         messaging_product: 'whatsapp',
         to: phone,

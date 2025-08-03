@@ -10,47 +10,31 @@ const Groq = require("groq-sdk");
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 
-// Dummy users
+const client = new Groq({ apiKey: process.env.GROQ_API_KEY });
+
 const users = {
-  "+256771880410": { pin: "1234", balance: 234000, loan: 0 },
-  "+256706025524": { pin: "4321", balance: 50000, loan: 10000 },
-  "+256700000003": { pin: "1111", balance: 120000, loan: 20000 }
+  "+256771880410": { pin: "1234", balance: 234000, loan: 0, verified: false },
+  "+256706025524": { pin: "4321", balance: 50000, loan: 10000, verified: false },
+  "+256700000003": { pin: "1111", balance: 120000, loan: 20000, verified: false }
 };
 
-// Initialize Groq
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-
-// Helper: Menu Text
-const menuText = `
-🧾 Welcome to ChatBook Services:
-You can use the following instructions:
-
-• balance <your_pin> — Check your account balance
-• loan <amount> <reason> <your_pin> — Request a loan
-• send <amount> to <name> <your_pin> — Transfer funds
-• menu — Show this help menu again
-`;
-
-// Helper: Intent extraction
 function extractIntent(message) {
   const lowered = message.toLowerCase();
   if (lowered.includes("balance")) return "balance";
   if (lowered.includes("send") || lowered.includes("transfer")) return "transfer";
   if (lowered.includes("loan")) return "loan";
-  if (lowered === "menu" || lowered === "help") return "menu";
   return "chat";
 }
 
 app.post("/whatsapp", async (req, res) => {
   const from = req.body.From.replace("whatsapp:", "");
-  const incomingMsg = req.body.Body.trim();
+  const incomingMsg = req.body.Body;
   const mediaUrl = req.body.MediaUrl0;
   const twiml = new MessagingResponse();
   const msg = twiml.message();
   let finalText = incomingMsg;
 
   try {
-    // Handle voice message if exists
     if (mediaUrl) {
       const oggPath = path.join(__dirname, "voice.ogg");
       const wavPath = path.join(__dirname, "voice.wav");
@@ -60,55 +44,60 @@ app.post("/whatsapp", async (req, res) => {
       await new Promise((resolve, reject) => {
         ffmpeg(oggPath)
           .toFormat("wav")
-          .on("error", (err) => {
-            console.error("FFmpeg error:", err.message);
-            reject(err);
-          })
-          .on("end", () => {
-            console.log("Audio converted to WAV successfully");
-            resolve();
-          })
+          .on("error", reject)
+          .on("end", resolve)
           .save(wavPath);
       });
 
-      // Use Groq/Whisper (or placeholder)
-      finalText = "[Voice recognition unavailable in Groq]"; // Update with transcription if using Whisper
+      const whisperResponse = await axios.post("https://api.groq.com/v1/audio/transcriptions", {
+        file: fs.createReadStream(wavPath),
+        model: "whisper-1",
+      }, {
+        headers: {
+          Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+          "Content-Type": "multipart/form-data"
+        }
+      });
+
+      finalText = whisperResponse.data.text;
     }
 
     const user = users[from];
     if (!user) {
-      msg.body("❌ You are not registered. Please contact support.");
+      msg.body("You are not registered in the system.");
     } else {
-      const intent = extractIntent(finalText.toLowerCase());
+      const intent = extractIntent(finalText);
+
+      // Welcome Menu
+      const menu = `
+Welcome to FanitePay:
+1. Check balance — type: balance
+2. Send money — type: send 5000 to John
+3. Request loan — type: loan 100000 for business
+Please respond with one of the options above.`;
+
+      // PIN must be verified externally
+      if (!user.verified && ["balance", "transfer", "loan"].includes(intent)) {
+        msg.body(`For security, please verify your PIN here first: https://fntpwifi.netlify.app/?phone=${encodeURIComponent(from)}`);
+        return res.type("text/xml").send(twiml.toString());
+      }
 
       switch (intent) {
         case "balance":
-          if (finalText.includes(user.pin)) {
-            msg.body(`💰 Your current balance is UGX ${user.balance.toLocaleString()}.`);
-          } else {
-            msg.body("🔐 Please include your PIN to check balance. Example: balance 1234");
-          }
+          msg.body(`Your current balance is UGX ${user.balance.toLocaleString()}.`);
           break;
         case "transfer":
-          if (!finalText.includes(user.pin)) {
-            msg.body("🔐 Please include your PIN to transfer funds. Example: send 5000 to John 1234");
-          } else {
-            msg.body("✅ Transfer request received. (Simulated response)");
-          }
+          msg.body("Transfer request received. (This is a demo, no real transfer will occur.)");
           break;
         case "loan":
-          if (!finalText.includes(user.pin)) {
-            msg.body("🔐 Please include your PIN to request a loan. Example: loan 100000 for business 1234");
-          } else {
-            msg.body("✅ Loan request received. (Simulated response)");
-          }
-          break;
-        case "menu":
-          msg.body(menuText);
+          msg.body("Loan request received. (This is a demo, no real loan will be issued.)");
           break;
         default:
-          // If nothing matches, fallback to menu
-          msg.body("❓ I didn’t understand that.\n" + menuText);
+          const chatResponse = await client.chat.completions.create({
+            model: "llama3-8b-8192",
+            messages: [{ role: "user", content: finalText }]
+          });
+          msg.body(chatResponse.choices[0].message.content + "\n\n" + menu);
           break;
       }
     }
@@ -116,7 +105,7 @@ app.post("/whatsapp", async (req, res) => {
     res.type("text/xml").send(twiml.toString());
   } catch (error) {
     console.error("Error:", error.message);
-    msg.body("❌ An error occurred. Please try again later.");
+    msg.body("Sorry, an error occurred processing your message.");
     res.type("text/xml").send(twiml.toString());
   }
 });

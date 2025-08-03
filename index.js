@@ -15,8 +15,7 @@ const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const sendWhatsapp = async (phone, text) => {
   try {
     await axios.post(
-      '`https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
-
+      `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
       {
         messaging_product: 'whatsapp',
         to: phone,
@@ -33,6 +32,7 @@ const sendWhatsapp = async (phone, text) => {
     console.error('Sending error:', err.response?.data || err.message);
   }
 };
+
 
 const sendOtp = async (phone) => {
   const otp = Math.floor(100000 + Math.random() * 900000).toString();

@@ -1,158 +1,114 @@
+require("dotenv").config();
 const express = require("express");
-const bodyParser = require("body-parser");
 const axios = require("axios");
 const fs = require("fs");
-const path = require("path");
-const ffmpeg = require("fluent-ffmpeg");
-const OpenAI = require("openai");
+const multer = require("multer");
+const { default: OpenAI } = require("openai");
 
 const app = express();
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: false }));
+const port = process.env.PORT || 3000;
 
-// OpenAI setup using v4 SDK
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const WHATSAPP_TOKEN = `Bearer ${process.env.META_ACCESS_TOKEN}`;
+const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "fntp-fintech";
 
-// Intent extractor
-function extractIntent(message) {
-  const lowered = message.toLowerCase();
-  if (lowered.includes("balance")) return "balance";
-  if (lowered.includes("send") || lowered.includes("transfer")) return "transfer";
-  if (lowered.includes("loan")) return "loan";
-  return "chat";
-}
+// Parse JSON
+app.use(express.json());
 
-// Verify Meta Webhook
+// 🧪 Webhook Verification for Meta
 app.get("/whatsapp", (req, res) => {
-  const VERIFY_TOKEN = process.env.META_VERIFY_TOKEN;
-
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
 
   if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    console.log("Webhook verified successfully.");
+    console.log("Webhook verified ✅");
     res.status(200).send(challenge);
   } else {
+    console.log("Webhook verification failed ❌");
     res.sendStatus(403);
   }
 });
 
-// Webhook to receive messages
+// 📥 Incoming WhatsApp Message Webhook
 app.post("/whatsapp", async (req, res) => {
-  try {
-    const body = req.body;
+  const body = req.body;
 
-    if (body.object) {
-      const entry = body.entry?.[0];
-      const changes = entry?.changes?.[0];
-      const value = changes?.value;
-      const messages = value?.messages;
+  if (
+    body?.object === "whatsapp_business_account" &&
+    body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]
+  ) {
+    const msg = body.entry[0].changes[0].value.messages[0];
+    const from = msg.from; // WhatsApp user number
+    const msgBody = msg.text?.body?.trim().toLowerCase() || "";
 
-      if (messages && messages.length > 0) {
-        const msg = messages[0];
-        const phone_number_id = value.metadata.phone_number_id;
-        const from = msg.from; // user's WhatsApp number
-        let finalText = msg.text?.body || "";
+    console.log(`📩 Received message: ${msgBody} from ${from}`);
 
-        // Check for audio
-        if (msg.type === "audio") {
-          const mediaId = msg.audio.id;
+    // 🔁 Define your logic
+    let reply = "Sorry, I didn't understand your message.";
 
-          // Get media URL
-          const mediaRes = await axios({
-            method: "GET",
-            url: `https://graph.facebook.com/v19.0/${mediaId}`,
-            headers: {
-              Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
-            },
-          });
-
-          const mediaUrl = mediaRes.data.url;
-
-          // Download audio
-          const audioBuffer = await axios.get(mediaUrl, {
-            responseType: "arraybuffer",
-            headers: {
-              Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
-            },
-          });
-
-          const oggPath = path.join(__dirname, "voice.ogg");
-          const wavPath = path.join(__dirname, "voice.wav");
-          fs.writeFileSync(oggPath, audioBuffer.data);
-
-          // Convert to WAV
-          await new Promise((resolve, reject) => {
-            ffmpeg(oggPath)
-              .toFormat("wav")
-              .on("error", reject)
-              .on("end", resolve)
-              .save(wavPath);
-          });
-
-          // Transcribe using Whisper
-          const transcription = await openai.audio.transcriptions.create({
-            file: fs.createReadStream(wavPath),
-            model: "whisper-1",
-          });
-
-          finalText = transcription.text;
-        }
-
-        // Extract intent
-        const intent = extractIntent(finalText);
-
-        let reply = "";
-
-        switch (intent) {
-          case "balance":
-            reply = "Your current balance is UGX 234,000.";
-            break;
-          case "transfer":
-            reply = "To transfer funds, please reply with: Send [amount] to [recipient name].";
-            break;
-          case "loan":
-            reply = "To apply for a loan, reply with the amount and purpose (e.g., 'Loan 50000 for school fees').";
-            break;
-          default:
-            const chatRes = await openai.chat.completions.create({
-              model: "gpt-4",
-              messages: [{ role: "user", content: finalText }],
-            });
-            reply = chatRes.choices[0].message.content;
-            break;
-        }
-
-        // Send reply
-        await axios.post(
-          `https://graph.facebook.com/v19.0/${phone_number_id}/messages`,
-          {
-            messaging_product: "whatsapp",
-            to: from,
-            text: { body: reply },
-          },
-          {
-            headers: {
-              Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
-              "Content-Type": "application/json",
-            },
-          }
-        );
-      }
-
-      res.sendStatus(200);
-    } else {
-      res.sendStatus(404);
+    if (msgBody.includes("balance")) {
+      reply = "Your current balance is UGX 45,000.";
+    } else if (msgBody.includes("loan")) {
+      reply = "You have an active loan of UGX 120,000. Due: 12 Aug 2025.";
     }
+
+    // 📤 Send reply
+    await sendWhatsappMessage(from, reply);
+  }
+
+  res.sendStatus(200);
+});
+
+// 📤 Send WhatsApp Message
+async function sendWhatsappMessage(to, messageText) {
+  try {
+    const res = await axios.post(
+      `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to,
+        type: "text",
+        text: {
+          preview_url: false,
+          body: messageText,
+        },
+      },
+      {
+        headers: {
+          Authorization: WHATSAPP_TOKEN,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+    console.log("✅ Message sent:", res.data);
   } catch (error) {
-    console.error("Error:", error.message);
-    res.sendStatus(500);
+    console.error(
+      "❌ Failed to send message:",
+      error.response?.data || error.message
+    );
+  }
+}
+
+// Optional: Audio Transcription with Whisper
+const upload = multer({ dest: "uploads/" });
+
+app.post("/transcribe", upload.single("audio"), async (req, res) => {
+  try {
+    const transcription = await openai.audio.transcriptions.create({
+      file: fs.createReadStream(req.file.path),
+      model: "whisper-1",
+    });
+    fs.unlinkSync(req.file.path); // Clean up file
+    res.json({ transcription: transcription.text });
+  } catch (err) {
+    console.error("Whisper error:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// Start server
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`✅ Server is running on port ${PORT}`));
+app.listen(port, () => {
+  console.log(`🚀 Server is running on port ${port}`);
+});

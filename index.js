@@ -91,7 +91,7 @@ app.post('/whatsapp', async (req, res) => {
     if (message === 'hi' || message === 'hello' || message === 'start') {
       await sendWhatsapp(
         phone,
-        `Welcome to Fanitepay 🚀\n\nYou can:\n• Pay bills\n• Buy airtime\n• Transfer money\n• Check balance\n\nType "help" to see all options.`
+        `Welcome to Fanitepay \n\nYou can:\n• Pay bills\n• Buy airtime\n• Transfer money\n• Check balance\n\nType "help" to see all options.`
       );
     } else if (message === 'help') {
       await showHelp(phone);
@@ -112,7 +112,7 @@ app.post('/whatsapp', async (req, res) => {
     } else {
       await sendWhatsapp(
         phone,
-        `🤖 Sorry, I didn't understand that.\nType "help" to see available commands.`
+        `Sorry, I didn't understand that.\nType "help" to see available commands.`
       );
     }
 

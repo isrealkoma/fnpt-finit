@@ -11,8 +11,9 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY; // Add to .env
-const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent';
+const CLOUDFLARE_ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID; // Add to .env
+const CLOUDFLARE_API_TOKEN = process.env.CLOUDFLARE_API_TOKEN; // Add to .env
+const CLOUDFLARE_API_URL = `https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/run/@cf/mixtral-8x7b-instruct`;
 
 // Function to send WhatsApp message
 const sendWhatsapp = async (phone, text) => {
@@ -119,7 +120,7 @@ const intentToCommand = {
   greeting: 'help', // Map greetings to help
 };
 
-// Parse user input using Google Gemini Pro API
+// Parse user input using Cloudflare Workers AI (Mixtral model)
 const parseCommand = async (message) => {
   const candidateIntents = Object.keys(intentToCommand); // e.g., ['check_balance', 'pay_water', ...]
   const prompt = `
@@ -130,22 +131,21 @@ const parseCommand = async (message) => {
 
   try {
     const response = await axios.post(
-      `${GEMINI_API_URL}?key=${GEMINI_API_KEY}`,
+      CLOUDFLARE_API_URL,
       {
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: {
-          maxOutputTokens: 50,
-          temperature: 0.3, // Low temperature for deterministic output
-        },
+        prompt: prompt,
+        max_tokens: 50,
+        temperature: 0.3, // Low temperature for deterministic output
       },
       {
         headers: {
+          Authorization: `Bearer ${CLOUDFLARE_API_TOKEN}`,
           'Content-Type': 'application/json',
         },
       }
     );
 
-    const intent = response.data.candidates[0]?.content?.parts[0]?.text?.trim() || 'none';
+    const intent = response.data.result?.response?.trim() || 'none';
     if (intent === 'none' || !intentToCommand[intent]) {
       // Check for OTP (6-digit number)
       if (/^\d{6}$/.test(message.trim())) {
@@ -156,7 +156,7 @@ const parseCommand = async (message) => {
 
     return intentToCommand[intent];
   } catch (err) {
-    console.error('Gemini API error:', err.response?.data || err.message);
+    console.error('Cloudflare AI error:', err.response?.data || err.message);
     // Fallback to OTP check
     if (/^\d{6}$/.test(message.trim())) {
       return 'otp';

@@ -1,7 +1,6 @@
 const express = require('express');
 const axios = require('axios');
 const { createClient } = require('@supabase/supabase-js');
-const { OpenAI } = require('openai');
 const dotenv = require('dotenv');
 dotenv.config();
 
@@ -12,7 +11,8 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY }); // Initialize OpenAI client
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY; // Add to .env
+const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent';
 
 // Function to send WhatsApp message
 const sendWhatsapp = async (phone, text) => {
@@ -116,10 +116,10 @@ const intentToCommand = {
   transfer: 'transfer',
   loans: 'loans',
   help: 'help',
-  greeting: 'greeting',
+  greeting: 'help', // Map greetings to help
 };
 
-// Parse user input using OpenAI's ChatGPT API
+// Parse user input using Google Gemini Pro API
 const parseCommand = async (message) => {
   const candidateIntents = Object.keys(intentToCommand); // e.g., ['check_balance', 'pay_water', ...]
   const prompt = `
@@ -129,14 +129,23 @@ const parseCommand = async (message) => {
   `;
 
   try {
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-3.5-turbo', // Use gpt-4 if available and preferred
-      messages: [{ role: 'user', content: prompt }],
-      max_tokens: 50,
-      temperature: 0.3, // Low temperature for deterministic output
-    });
+    const response = await axios.post(
+      `${GEMINI_API_URL}?key=${GEMINI_API_KEY}`,
+      {
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          maxOutputTokens: 50,
+          temperature: 0.3, // Low temperature for deterministic output
+        },
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      }
+    );
 
-    const intent = completion.choices[0]?.message?.content?.trim() || 'none';
+    const intent = response.data.candidates[0]?.content?.parts[0]?.text?.trim() || 'none';
     if (intent === 'none' || !intentToCommand[intent]) {
       // Check for OTP (6-digit number)
       if (/^\d{6}$/.test(message.trim())) {
@@ -147,7 +156,7 @@ const parseCommand = async (message) => {
 
     return intentToCommand[intent];
   } catch (err) {
-    console.error('OpenAI API error:', err.message);
+    console.error('Gemini API error:', err.response?.data || err.message);
     // Fallback to OTP check
     if (/^\d{6}$/.test(message.trim())) {
       return 'otp';
@@ -185,12 +194,7 @@ app.post('/whatsapp', async (req, res) => {
 
     const command = await parseCommand(message);
 
-    if (command === 'greeting') {
-      await sendWhatsapp(
-        phone,
-        `👋 Welcome to Fanitepay!\n\nYou can:\n• Pay bills\n• Buy airtime\n• Transfer money\n• Check balance\n• Check loans\n\nType "help" to see all options.`
-      );
-    } else if (command === 'help') {
+    if (command === 'help') {
       await showHelp(phone);
     } else if (command === 'balance') {
       const balance = await getWalletBalance(user_id);

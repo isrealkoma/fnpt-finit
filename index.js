@@ -1,6 +1,7 @@
-        const express = require('express');
+const express = require('express');
 const axios = require('axios');
 const { createClient } = require('@supabase/supabase-js');
+const { OpenAI } = require('openai');
 const dotenv = require('dotenv');
 dotenv.config();
 
@@ -11,7 +12,7 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
-const HUGGINGFACE_API_TOKEN = process.env.HUGGINGFACE_API_TOKEN; // Add to .env
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY }); // Initialize OpenAI client
 
 // Function to send WhatsApp message
 const sendWhatsapp = async (phone, text) => {
@@ -118,7 +119,7 @@ const intentToCommand = {
   greeting: 'greeting',
 };
 
-// Parse user input using OpenChat via Hugging Face API
+// Parse user input using OpenAI's ChatGPT API
 const parseCommand = async (message) => {
   const candidateIntents = Object.keys(intentToCommand); // e.g., ['check_balance', 'pay_water', ...]
   const prompt = `
@@ -128,21 +129,14 @@ const parseCommand = async (message) => {
   `;
 
   try {
-    const response = await axios.post(
-      'https://api-inference.huggingface.co/models/openchat/openchat-3.6-8b',
-      {
-        inputs: prompt,
-        parameters: { max_new_tokens: 50, return_full_text: false },
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${HUGGINGFACE_API_TOKEN}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-3.5-turbo', // Use gpt-4 if available and preferred
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 50,
+      temperature: 0.3, // Low temperature for deterministic output
+    });
 
-    const intent = response.data[0]?.generated_text?.trim() || 'none';
+    const intent = completion.choices[0]?.message?.content?.trim() || 'none';
     if (intent === 'none' || !intentToCommand[intent]) {
       // Check for OTP (6-digit number)
       if (/^\d{6}$/.test(message.trim())) {
@@ -153,7 +147,7 @@ const parseCommand = async (message) => {
 
     return intentToCommand[intent];
   } catch (err) {
-    console.error('Hugging Face API error:', err.response?.data || err.message);
+    console.error('OpenAI API error:', err.message);
     // Fallback to OTP check
     if (/^\d{6}$/.test(message.trim())) {
       return 'otp';

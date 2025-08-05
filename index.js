@@ -11,7 +11,9 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
+const HUGGINGFACE_API_TOKEN = process.env.HUGGINGFACE_API_TOKEN; // Add to .env
 
+// Function to send WhatsApp message
 const sendWhatsapp = async (phone, text) => {
   try {
     await axios.post(
@@ -33,6 +35,7 @@ const sendWhatsapp = async (phone, text) => {
   }
 };
 
+// Ensure user exists in Supabase
 const ensureUserExists = async (phone) => {
   const { data, error } = await supabase.from('users').select('*').eq('phone', phone).single();
   if (data) return data;
@@ -45,16 +48,17 @@ const ensureUserExists = async (phone) => {
 
   if (insertErr) throw insertErr;
 
-  // Also create wallet
   await supabase.from('wallets').insert([{ user_id: newUser.id, balance: 0 }]);
   return newUser;
 };
 
+// Get wallet balance
 const getWalletBalance = async (user_id) => {
   const { data, error } = await supabase.from('wallets').select('balance').eq('user_id', user_id).single();
   return data?.balance ?? 0;
 };
 
+// Send OTP
 const sendOtp = async (phone) => {
   const otp = Math.floor(100000 + Math.random() * 900000).toString();
   await supabase
@@ -64,6 +68,7 @@ const sendOtp = async (phone) => {
   await sendWhatsapp(phone, `🔐 Your Fanitepay OTP is: ${otp}`);
 };
 
+// Verify OTP
 const verifyOtp = async (phone, code) => {
   const { data, error } = await supabase
     .from('otps')
@@ -83,16 +88,78 @@ const verifyOtp = async (phone, code) => {
   return false;
 };
 
+// Show help message
 const showHelp = (phone) =>
   sendWhatsapp(
     phone,
     `Here are the commands you can use with Fanitepay:\n\n` +
-      `• balance\n• pay water\n• pay electricity\n• pay tv\n• airtime\n` +
-      `• top up\n• transfer\n• help`
+      `• balance - Check your account balance\n` +
+      `• pay water - Pay water bill\n` +
+      `• pay electricity - Pay electricity bill\n` +
+      `• pay tv - Pay TV bill\n` +
+      `• airtime - Buy airtime\n` +
+      `• top up - Top up your wallet\n` +
+      `• transfer - Transfer money\n` +
+      `• loans - Check or apply for loans\n` +
+      `• help - Show this help message`
   );
 
-const pendingActions = {}; // in-memory (for demo)
+// Intent-to-command mapping
+const intentToCommand = {
+  check_balance: 'balance',
+  pay_water: 'pay water',
+  pay_electricity: 'pay electricity',
+  pay_tv: 'pay tv',
+  airtime: 'airtime',
+  top_up: 'top up',
+  transfer: 'transfer',
+  loans: 'loans',
+  help: 'help',
+  greeting: 'greeting',
+};
 
+// Parse user input using Hugging Face Inference API
+const parseCommand = async (message) => {
+  const candidateLabels = Object.keys(intentToCommand); // e.g., ['check_balance', 'pay_water', ...]
+  try {
+    const response = await axios.post(
+      'https://api-inference.huggingface.co/models/facebook/bart-large-mnli',
+      {
+        inputs: message,
+        parameters: { candidate_labels: candidateLabels },
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${HUGGINGFACE_API_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    const { labels, scores } = response.data;
+    const topIntent = labels[0]; // Highest-scoring intent
+    const topScore = scores[0];
+
+    // Only accept intent if confidence score is above a threshold (e.g., 0.5)
+    if (topScore > 0.5) {
+      return intentToCommand[topIntent] || null;
+    }
+
+    // Check for OTP (6-digit number)
+    if (/^\d{6}$/.test(message.trim())) {
+      return 'otp';
+    }
+
+    return null; // No valid intent detected
+  } catch (err) {
+    console.error('Hugging Face API error:', err.response?.data || err.message);
+    return null;
+  }
+};
+
+const pendingActions = {}; // In-memory store for pending actions
+
+// Webhook verification endpoint
 app.get('/whatsapp', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -104,47 +171,54 @@ app.get('/whatsapp', (req, res) => {
   }
 });
 
+// Webhook message handling endpoint
 app.post('/whatsapp', async (req, res) => {
   try {
     const entry = req.body.entry?.[0];
     const changes = entry?.changes?.[0]?.value?.messages?.[0];
     if (!changes) return res.sendStatus(200);
 
-    const message = changes.text?.body?.trim().toLowerCase();
+    const message = changes.text?.body;
     const phone = changes.from;
 
     const user = await ensureUserExists(phone);
     const user_id = user.id;
 
-    if (message === 'hi' || message === 'hello' || message === 'start') {
+    const command = await parseCommand(message);
+
+    if (command === 'greeting') {
       await sendWhatsapp(
         phone,
-        `👋 Welcome to Fanitepay!\n\nYou can:\n• Pay bills\n• Buy airtime\n• Transfer money\n• Check balance\n\nType "help" to see all options.`
+        `👋 Welcome to Fanitepay!\n\nYou can:\n• Pay bills\n• Buy airtime\n• Transfer money\n• Check balance\n• Check loans\n\nType "help" to see all options.`
       );
-    } else if (message === 'help') {
+    } else if (command === 'help') {
       await showHelp(phone);
-    } else if (message === 'balance') {
+    } else if (command === 'balance') {
       const balance = await getWalletBalance(user_id);
       await sendWhatsapp(phone, `💰 Your balance is UGX ${balance.toLocaleString()}`);
+    } else if (command === 'loans') {
+      await sendWhatsapp(
+        phone,
+        `💸 Loans feature is under development. You can check loan eligibility or apply for a loan soon!`
+      );
     } else if (
-      ['pay water', 'pay electricity', 'pay tv', 'airtime', 'top up', 'transfer'].includes(message)
+      ['pay water', 'pay electricity', 'pay tv', 'airtime', 'top up', 'transfer'].includes(command)
     ) {
-      pendingActions[phone] = message;
+      pendingActions[phone] = command;
       await sendOtp(phone);
-      await sendWhatsapp(phone, `To continue, please enter the OTP sent to your phone.`);
-    } else if (/^\d{6}$/.test(message)) {
+      await sendWhatsapp(phone, `To continue with ${command}, please enter the OTP sent to your phone.`);
+    } else if (command === 'otp') {
       const valid = await verifyOtp(phone, message);
       if (valid) {
         const action = pendingActions[phone];
         delete pendingActions[phone];
 
-        // Log transaction in Supabase
         await supabase.from('transactions').insert([
           {
             user_id,
             type: action,
             status: 'completed',
-            amount: 1000, // You can change logic to accept amount via conversation
+            amount: 1000, // Placeholder amount
             metadata: { description: `Sample ${action} transaction` },
           },
         ]);
@@ -167,5 +241,6 @@ app.post('/whatsapp', async (req, res) => {
   }
 });
 
+// Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`⚡ Server running on port ${PORT}`));

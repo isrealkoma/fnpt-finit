@@ -11,11 +11,10 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
-const CLOUDFLARE_ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID; // Add to .env
-const CLOUDFLARE_API_TOKEN = process.env.CLOUDFLARE_API_TOKEN; // Add to .env
+const CLOUDFLARE_ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID;
+const CLOUDFLARE_API_TOKEN = process.env.CLOUDFLARE_API_TOKEN;
 const CLOUDFLARE_API_URL = `https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/run/@cf/mixtral-8x7b-instruct`;
 
-// Function to send WhatsApp message
 const sendWhatsapp = async (phone, text) => {
   try {
     await axios.post(
@@ -37,7 +36,6 @@ const sendWhatsapp = async (phone, text) => {
   }
 };
 
-// Ensure user exists in Supabase
 const ensureUserExists = async (phone) => {
   const { data, error } = await supabase.from('users').select('*').eq('phone', phone).single();
   if (data) return data;
@@ -54,13 +52,11 @@ const ensureUserExists = async (phone) => {
   return newUser;
 };
 
-// Get wallet balance
 const getWalletBalance = async (user_id) => {
   const { data, error } = await supabase.from('wallets').select('balance').eq('user_id', user_id).single();
   return data?.balance ?? 0;
 };
 
-// Send OTP
 const sendOtp = async (phone) => {
   const otp = Math.floor(100000 + Math.random() * 900000).toString();
   await supabase
@@ -70,7 +66,6 @@ const sendOtp = async (phone) => {
   await sendWhatsapp(phone, `🔐 Your Fanitepay OTP is: ${otp}`);
 };
 
-// Verify OTP
 const verifyOtp = async (phone, code) => {
   const { data, error } = await supabase
     .from('otps')
@@ -90,7 +85,6 @@ const verifyOtp = async (phone, code) => {
   return false;
 };
 
-// Show help message
 const showHelp = (phone) =>
   sendWhatsapp(
     phone,
@@ -106,7 +100,6 @@ const showHelp = (phone) =>
       `• help - Show this help message`
   );
 
-// Intent-to-command mapping
 const intentToCommand = {
   check_balance: 'balance',
   pay_water: 'pay water',
@@ -117,25 +110,29 @@ const intentToCommand = {
   transfer: 'transfer',
   loans: 'loans',
   help: 'help',
-  greeting: 'help', // Map greetings to help
+  greeting: 'help',
 };
 
-// Parse user input using Cloudflare Workers AI (Mixtral model)
 const parseCommand = async (message) => {
-  const candidateIntents = Object.keys(intentToCommand); // e.g., ['check_balance', 'pay_water', ...]
+  const normalized = message.trim().toLowerCase();
+
+  // Manual match for greetings
+  if (['hi', 'hello', 'hey'].includes(normalized)) return 'help';
+
+  const candidateIntents = Object.keys(intentToCommand);
   const prompt = `
-    You are a WhatsApp fintech bot. Classify the following user message into one of these intents: ${candidateIntents.join(', ')}.
-    Message: "${message}"
-    Return only the intent name (e.g., check_balance, pay_water, etc.). If the intent is unclear, return "none".
-  `;
+You are a WhatsApp fintech bot. Classify the following user message into one of these intents: ${candidateIntents.join(', ')}.
+Message: "${normalized}"
+Return only the intent name (e.g., check_balance, pay_water, etc.). If the intent is unclear, return "none".
+`;
 
   try {
     const response = await axios.post(
       CLOUDFLARE_API_URL,
       {
-        prompt: prompt,
+        prompt,
         max_tokens: 50,
-        temperature: 0.3, // Low temperature for deterministic output
+        temperature: 0.3,
       },
       {
         headers: {
@@ -145,29 +142,24 @@ const parseCommand = async (message) => {
       }
     );
 
-    const intent = response.data.result?.response?.trim() || 'none';
+    const intent = response.data.result?.response?.trim().toLowerCase() || 'none';
+    console.log('Parsed intent:', intent); // Debug log
+
     if (intent === 'none' || !intentToCommand[intent]) {
-      // Check for OTP (6-digit number)
-      if (/^\d{6}$/.test(message.trim())) {
-        return 'otp';
-      }
-      return null; // No valid intent detected
+      if (/^\d{6}$/.test(normalized)) return 'otp';
+      return null;
     }
 
     return intentToCommand[intent];
   } catch (err) {
     console.error('Cloudflare AI error:', err.response?.data || err.message);
-    // Fallback to OTP check
-    if (/^\d{6}$/.test(message.trim())) {
-      return 'otp';
-    }
+    if (/^\d{6}$/.test(normalized)) return 'otp';
     return null;
   }
 };
 
-const pendingActions = {}; // In-memory store for pending actions
+const pendingActions = {};
 
-// Webhook verification endpoint
 app.get('/whatsapp', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -179,7 +171,6 @@ app.get('/whatsapp', (req, res) => {
   }
 });
 
-// Webhook message handling endpoint
 app.post('/whatsapp', async (req, res) => {
   try {
     const entry = req.body.entry?.[0];
@@ -188,6 +179,11 @@ app.post('/whatsapp', async (req, res) => {
 
     const message = changes.text?.body;
     const phone = changes.from;
+
+    if (!message) {
+      await sendWhatsapp(phone, `⚠️ Only text messages are supported at the moment.`);
+      return res.sendStatus(200);
+    }
 
     const user = await ensureUserExists(phone);
     const user_id = user.id;
@@ -221,7 +217,7 @@ app.post('/whatsapp', async (req, res) => {
             user_id,
             type: action,
             status: 'completed',
-            amount: 1000, // Placeholder amount
+            amount: 1000, // Placeholder
             metadata: { description: `Sample ${action} transaction` },
           },
         ]);
@@ -233,7 +229,7 @@ app.post('/whatsapp', async (req, res) => {
     } else {
       await sendWhatsapp(
         phone,
-        `❓ I didn't understand that.\nType "help" to see available commands.`
+        `❓ Sorry, I didn't understand that.\nType *help* to see available commands.`
       );
     }
 
@@ -244,6 +240,5 @@ app.post('/whatsapp', async (req, res) => {
   }
 });
 
-// Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`⚡ Server running on port ${PORT}`));

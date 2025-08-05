@@ -1,4 +1,4 @@
-const express = require('express');
+        const express = require('express');
 const axios = require('axios');
 const { createClient } = require('@supabase/supabase-js');
 const dotenv = require('dotenv');
@@ -118,15 +118,21 @@ const intentToCommand = {
   greeting: 'greeting',
 };
 
-// Parse user input using Hugging Face Inference API
+// Parse user input using OpenChat via Hugging Face API
 const parseCommand = async (message) => {
-  const candidateLabels = Object.keys(intentToCommand); // e.g., ['check_balance', 'pay_water', ...]
+  const candidateIntents = Object.keys(intentToCommand); // e.g., ['check_balance', 'pay_water', ...]
+  const prompt = `
+    You are a WhatsApp fintech bot. Classify the following user message into one of these intents: ${candidateIntents.join(', ')}.
+    Message: "${message}"
+    Return only the intent name (e.g., check_balance, pay_water, etc.). If the intent is unclear, return "none".
+  `;
+
   try {
     const response = await axios.post(
-      'https://api-inference.huggingface.co/models/facebook/bart-large-mnli',
+      'https://api-inference.huggingface.co/models/openchat/openchat-3.6-8b',
       {
-        inputs: message,
-        parameters: { candidate_labels: candidateLabels },
+        inputs: prompt,
+        parameters: { max_new_tokens: 50, return_full_text: false },
       },
       {
         headers: {
@@ -136,23 +142,22 @@ const parseCommand = async (message) => {
       }
     );
 
-    const { labels, scores } = response.data;
-    const topIntent = labels[0]; // Highest-scoring intent
-    const topScore = scores[0];
-
-    // Only accept intent if confidence score is above a threshold (e.g., 0.5)
-    if (topScore > 0.5) {
-      return intentToCommand[topIntent] || null;
+    const intent = response.data[0]?.generated_text?.trim() || 'none';
+    if (intent === 'none' || !intentToCommand[intent]) {
+      // Check for OTP (6-digit number)
+      if (/^\d{6}$/.test(message.trim())) {
+        return 'otp';
+      }
+      return null; // No valid intent detected
     }
 
-    // Check for OTP (6-digit number)
+    return intentToCommand[intent];
+  } catch (err) {
+    console.error('Hugging Face API error:', err.response?.data || err.message);
+    // Fallback to OTP check
     if (/^\d{6}$/.test(message.trim())) {
       return 'otp';
     }
-
-    return null; // No valid intent detected
-  } catch (err) {
-    console.error('Hugging Face API error:', err.response?.data || err.message);
     return null;
   }
 };

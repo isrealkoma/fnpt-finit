@@ -1,6 +1,7 @@
 const express = require('express');
 const axios = require('axios');
 const { createClient } = require('@supabase/supabase-js');
+const { OpenAI } = require('openai');
 const dotenv = require('dotenv');
 dotenv.config();
 
@@ -8,13 +9,26 @@ const app = express();
 app.use(express.json());
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
-const CLOUDFLARE_ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID;
-const CLOUDFLARE_API_TOKEN = process.env.CLOUDFLARE_API_TOKEN;
-const CLOUDFLARE_API_URL = `https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/run/@cf/mixtral-8x7b-instruct`;
 
+const intentToCommand = {
+  check_balance: 'balance',
+  pay_water: 'pay water',
+  pay_electricity: 'pay electricity',
+  pay_tv: 'pay tv',
+  airtime: 'airtime',
+  top_up: 'top up',
+  transfer: 'transfer',
+  loans: 'loans',
+  help: 'help',
+  greeting: 'help',
+};
+
+// Send WhatsApp message
 const sendWhatsapp = async (phone, text) => {
   try {
     await axios.post(
@@ -36,6 +50,7 @@ const sendWhatsapp = async (phone, text) => {
   }
 };
 
+// Create user if not exists
 const ensureUserExists = async (phone) => {
   const { data, error } = await supabase.from('users').select('*').eq('phone', phone).single();
   if (data) return data;
@@ -52,11 +67,13 @@ const ensureUserExists = async (phone) => {
   return newUser;
 };
 
+// Get wallet balance
 const getWalletBalance = async (user_id) => {
-  const { data, error } = await supabase.from('wallets').select('balance').eq('user_id', user_id).single();
+  const { data } = await supabase.from('wallets').select('balance').eq('user_id', user_id).single();
   return data?.balance ?? 0;
 };
 
+// Send OTP
 const sendOtp = async (phone) => {
   const otp = Math.floor(100000 + Math.random() * 900000).toString();
   await supabase
@@ -66,8 +83,9 @@ const sendOtp = async (phone) => {
   await sendWhatsapp(phone, `🔐 Your Fanitepay OTP is: ${otp}`);
 };
 
+// Verify OTP
 const verifyOtp = async (phone, code) => {
-  const { data, error } = await supabase
+  const { data } = await supabase
     .from('otps')
     .select('*')
     .eq('phone', phone)
@@ -81,69 +99,53 @@ const verifyOtp = async (phone, code) => {
     await supabase.from('otps').update({ verified: true }).eq('id', data.id);
     return true;
   }
-
   return false;
 };
 
+// Show help
 const showHelp = (phone) =>
   sendWhatsapp(
     phone,
-    `Here are the commands you can use with Fanitepay:\n\n` +
-      `• balance - Check your account balance\n` +
+    `📌 *Fanitepay Commands:*\n\n` +
+      `• balance - Check account balance\n` +
       `• pay water - Pay water bill\n` +
       `• pay electricity - Pay electricity bill\n` +
       `• pay tv - Pay TV bill\n` +
       `• airtime - Buy airtime\n` +
       `• top up - Top up your wallet\n` +
       `• transfer - Transfer money\n` +
-      `• loans - Check or apply for loans\n` +
-      `• help - Show this help message`
+      `• loans - Loan services\n` +
+      `• help - Show this message`
   );
 
-const intentToCommand = {
-  check_balance: 'balance',
-  pay_water: 'pay water',
-  pay_electricity: 'pay electricity',
-  pay_tv: 'pay tv',
-  airtime: 'airtime',
-  top_up: 'top up',
-  transfer: 'transfer',
-  loans: 'loans',
-  help: 'help',
-  greeting: 'help',
-};
-
+// Parse intent using OpenAI
 const parseCommand = async (message) => {
   const normalized = message.trim().toLowerCase();
 
-  // Manual match for greetings
+  // Manual greeting shortcut
   if (['hi', 'hello', 'hey'].includes(normalized)) return 'help';
 
   const candidateIntents = Object.keys(intentToCommand);
   const prompt = `
-You are a WhatsApp fintech bot. Classify the following user message into one of these intents: ${candidateIntents.join(', ')}.
+You are a WhatsApp fintech bot. Classify the following user message into one of these intents:
+${candidateIntents.join(', ')}.
 Message: "${normalized}"
-Return only the intent name (e.g., check_balance, pay_water, etc.). If the intent is unclear, return "none".
+Respond with only the intent name (e.g., "check_balance"). If uncertain, return "none".
 `;
 
   try {
-    const response = await axios.post(
-      CLOUDFLARE_API_URL,
-      {
-        prompt,
-        max_tokens: 50,
-        temperature: 0.3,
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${CLOUDFLARE_API_TOKEN}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
+    const chatResponse = await openai.chat.completions.create({
+      model: 'gpt-3.5-turbo',
+      messages: [
+        { role: 'system', content: 'You classify messages into intent names for a fintech bot.' },
+        { role: 'user', content: prompt },
+      ],
+      temperature: 0.2,
+      max_tokens: 10,
+    });
 
-    const intent = response.data.result?.response?.trim().toLowerCase() || 'none';
-    console.log('Parsed intent:', intent); // Debug log
+    const intent = chatResponse.choices?.[0]?.message?.content?.trim().toLowerCase() || 'none';
+    console.log('Parsed intent:', intent);
 
     if (intent === 'none' || !intentToCommand[intent]) {
       if (/^\d{6}$/.test(normalized)) return 'otp';
@@ -152,7 +154,7 @@ Return only the intent name (e.g., check_balance, pay_water, etc.). If the inten
 
     return intentToCommand[intent];
   } catch (err) {
-    console.error('Cloudflare AI error:', err.response?.data || err.message);
+    console.error('OpenAI error:', err.message || err);
     if (/^\d{6}$/.test(normalized)) return 'otp';
     return null;
   }
@@ -160,6 +162,7 @@ Return only the intent name (e.g., check_balance, pay_water, etc.). If the inten
 
 const pendingActions = {};
 
+// WhatsApp webhook verification
 app.get('/whatsapp', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -171,6 +174,7 @@ app.get('/whatsapp', (req, res) => {
   }
 });
 
+// WhatsApp message handler
 app.post('/whatsapp', async (req, res) => {
   try {
     const entry = req.body.entry?.[0];
@@ -181,7 +185,7 @@ app.post('/whatsapp', async (req, res) => {
     const phone = changes.from;
 
     if (!message) {
-      await sendWhatsapp(phone, `⚠️ Only text messages are supported at the moment.`);
+      await sendWhatsapp(phone, `⚠️ Only text messages are supported.`);
       return res.sendStatus(200);
     }
 
@@ -196,16 +200,13 @@ app.post('/whatsapp', async (req, res) => {
       const balance = await getWalletBalance(user_id);
       await sendWhatsapp(phone, `💰 Your balance is UGX ${balance.toLocaleString()}`);
     } else if (command === 'loans') {
-      await sendWhatsapp(
-        phone,
-        `💸 Loans feature is under development. You can check loan eligibility or apply for a loan soon!`
-      );
+      await sendWhatsapp(phone, `💸 Our loans service is coming soon. Stay tuned!`);
     } else if (
       ['pay water', 'pay electricity', 'pay tv', 'airtime', 'top up', 'transfer'].includes(command)
     ) {
       pendingActions[phone] = command;
       await sendOtp(phone);
-      await sendWhatsapp(phone, `To continue with ${command}, please enter the OTP sent to your phone.`);
+      await sendWhatsapp(phone, `To continue with *${command}*, please enter the OTP sent to your phone.`);
     } else if (command === 'otp') {
       const valid = await verifyOtp(phone, message);
       if (valid) {
@@ -217,20 +218,17 @@ app.post('/whatsapp', async (req, res) => {
             user_id,
             type: action,
             status: 'completed',
-            amount: 1000, // Placeholder
+            amount: 1000, // Placeholder amount
             metadata: { description: `Sample ${action} transaction` },
           },
         ]);
 
-        await sendWhatsapp(phone, `✅ OTP verified. ${action.toUpperCase()} completed successfully.`);
+        await sendWhatsapp(phone, `✅ OTP verified. *${action.toUpperCase()}* completed successfully.`);
       } else {
         await sendWhatsapp(phone, `❌ Invalid or expired OTP. Please try again.`);
       }
     } else {
-      await sendWhatsapp(
-        phone,
-        `❓ Sorry, I didn't understand that.\nType *help* to see available commands.`
-      );
+      await sendWhatsapp(phone, `❓ I didn't understand that. Type *help* to see available commands.`);
     }
 
     res.sendStatus(200);
@@ -240,5 +238,6 @@ app.post('/whatsapp', async (req, res) => {
   }
 });
 
+// Start server
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`⚡ Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Fanitepay bot is running on port ${PORT}`));

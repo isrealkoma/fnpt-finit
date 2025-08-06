@@ -1,7 +1,6 @@
 const express = require('express');
 const axios = require('axios');
 const { createClient } = require('@supabase/supabase-js');
-const { OpenAI } = require('openai');
 const dotenv = require('dotenv');
 dotenv.config();
 
@@ -9,23 +8,43 @@ const app = express();
 app.use(express.json());
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// NLP Cloud Configuration
+const NLP_CLOUD_API_KEY = process.env.NLP_CLOUD_API_KEY;
+const NLP_CLOUD_MODEL = process.env.NLP_CLOUD_MODEL || 'distilbert-base-uncased-finetuned-sst-2-english';
+const NLP_CLOUD_BASE_URL = 'https://api.nlpcloud.io/v1';
 
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 
+// Intent classification training data for zero-shot classification
+const intentLabels = [
+  'check balance',
+  'pay water bill',
+  'pay electricity bill', 
+  'pay tv bill',
+  'buy airtime',
+  'top up wallet',
+  'transfer money',
+  'loan services',
+  'help request',
+  'greeting',
+  'none'
+];
+
 const intentToCommand = {
-  check_balance: 'balance',
-  pay_water: 'pay water',
-  pay_electricity: 'pay electricity',
-  pay_tv: 'pay tv',
-  airtime: 'airtime',
-  top_up: 'top up',
-  transfer: 'transfer',
-  loans: 'loans',
-  help: 'help',
-  greeting: 'help',
+  'check balance': 'balance',
+  'pay water bill': 'pay water',
+  'pay electricity bill': 'pay electricity',
+  'pay tv bill': 'pay tv',
+  'buy airtime': 'airtime',
+  'top up wallet': 'top up',
+  'transfer money': 'transfer',
+  'loan services': 'loans',
+  'help request': 'help',
+  'greeting': 'help',
+  'none': null
 };
 
 // Send WhatsApp message
@@ -118,44 +137,137 @@ const showHelp = (phone) =>
       `• help - Show this message`
   );
 
-// Parse intent using OpenAI
+// Parse intent using NLP Cloud
 const parseCommand = async (message) => {
-  const normalized = message.trim().toLowerCase();
+  const normalized = message.trim();
 
-  // Manual greeting shortcut
-  if (['hi', 'hello', 'hey'].includes(normalized)) return 'help';
-
-  const candidateIntents = Object.keys(intentToCommand);
-  const prompt = `
-You are a WhatsApp fintech bot. Classify the following user message into one of these intents:
-${candidateIntents.join(', ')}.
-Message: "${normalized}"
-Respond with only the intent name (e.g., "check_balance"). If uncertain, return "none".
-`;
+  // Check if it's an OTP first
+  if (/^\d{6}$/.test(normalized)) return 'otp';
 
   try {
-    const chatResponse = await openai.chat.completions.create({
-      model: 'gpt-3.5-turbo',
-      messages: [
-        { role: 'system', content: 'You classify messages into intent names for a fintech bot.' },
-        { role: 'user', content: prompt },
-      ],
-      temperature: 0.2,
-      max_tokens: 10,
+    // Handle common greetings quickly
+    const lowerMessage = normalized.toLowerCase();
+    if (['hi', 'hello', 'hey', 'start'].includes(lowerMessage)) {
+      return 'help';
+    }
+
+    // Use NLP Cloud's zero-shot classification
+    const response = await axios.post(
+      `${NLP_CLOUD_BASE_URL}/bart-large-mnli/classification`,
+      {
+        text: normalized,
+        labels: intentLabels,
+        multi_class: false
+      },
+      {
+        headers: {
+          'Authorization': `Token ${NLP_CLOUD_API_KEY}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    const classification = response.data;
+    const topLabel = classification.labels[0];
+    const confidence = classification.scores[0];
+
+    console.log('NLP Cloud response:', {
+      text: normalized,
+      topLabel: topLabel,
+      confidence: confidence,
+      allScores: classification.scores.slice(0, 3) // Top 3 scores
     });
 
-    const intent = chatResponse.choices?.[0]?.message?.content?.trim().toLowerCase() || 'none';
-    console.log('Parsed intent:', intent);
-
-    if (intent === 'none' || !intentToCommand[intent]) {
-      if (/^\d{6}$/.test(normalized)) return 'otp';
+    // Only proceed if confidence is above threshold
+    if (confidence < 0.6) {
+      console.log(`Low confidence (${confidence}), treating as unknown`);
       return null;
     }
 
-    return intentToCommand[intent];
+    // Map classified intent to command
+    if (topLabel && intentToCommand.hasOwnProperty(topLabel)) {
+      return intentToCommand[topLabel];
+    }
+
+    return null;
   } catch (err) {
-    console.error('OpenAI error:', err.message || err);
-    if (/^\d{6}$/.test(normalized)) return 'otp';
+    console.error('NLP Cloud error:', err.response?.data || err.message);
+    
+    // Fallback to simple keyword matching if NLP Cloud fails
+    const lowerMessage = normalized.toLowerCase();
+    if (lowerMessage.includes('balance')) return 'balance';
+    if (lowerMessage.includes('water')) return 'pay water';
+    if (lowerMessage.includes('electricity') || lowerMessage.includes('power') || lowerMessage.includes('light')) return 'pay electricity';
+    if (lowerMessage.includes('tv') || lowerMessage.includes('television') || lowerMessage.includes('dstv')) return 'pay tv';
+    if (lowerMessage.includes('airtime')) return 'airtime';
+    if (lowerMessage.includes('top up') || lowerMessage.includes('topup') || lowerMessage.includes('deposit')) return 'top up';
+    if (lowerMessage.includes('transfer') || lowerMessage.includes('send money') || lowerMessage.includes('send')) return 'transfer';
+    if (lowerMessage.includes('loan') || lowerMessage.includes('borrow')) return 'loans';
+    if (lowerMessage.includes('help') || lowerMessage.includes('command')) return 'help';
+    
+    return null;
+  }
+};
+
+// Alternative method using NLP Cloud's text generation for more complex intent parsing
+const parseCommandWithGeneration = async (message) => {
+  const normalized = message.trim();
+
+  // Check if it's an OTP first
+  if (/^\d{6}$/.test(normalized)) return 'otp';
+
+  try {
+    const prompt = `Classify this message into one of these fintech intents:
+- balance: check account balance
+- pay water: pay water bill
+- pay electricity: pay electricity bill  
+- pay tv: pay tv bill
+- airtime: buy airtime
+- top up: top up wallet
+- transfer: transfer money
+- loans: loan services
+- help: get help
+- none: if unclear
+
+Message: "${normalized}"
+Intent:`;
+
+    const response = await axios.post(
+      `${NLP_CLOUD_BASE_URL}/flan-alpaca-base/generation`,
+      {
+        text: prompt,
+        max_length: 10,
+        temperature: 0.1,
+        top_p: 0.9
+      },
+      {
+        headers: {
+          'Authorization': `Token ${NLP_CLOUD_API_KEY}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    const generatedText = response.data.generated_text.trim().toLowerCase();
+    console.log('Generated intent:', generatedText);
+
+    // Map generated intent to command
+    const intentMap = {
+      'balance': 'balance',
+      'pay water': 'pay water',
+      'pay electricity': 'pay electricity',
+      'pay tv': 'pay tv',
+      'airtime': 'airtime',
+      'top up': 'top up',
+      'transfer': 'transfer',
+      'loans': 'loans',
+      'help': 'help',
+      'none': null
+    };
+
+    return intentMap[generatedText] || null;
+  } catch (err) {
+    console.error('NLP Cloud generation error:', err.response?.data || err.message);
     return null;
   }
 };
@@ -235,6 +347,37 @@ app.post('/whatsapp', async (req, res) => {
   } catch (err) {
     console.error('Webhook error:', err);
     res.sendStatus(500);
+  }
+});
+
+// Health check endpoint for testing NLP Cloud connection
+app.get('/test-nlp', async (req, res) => {
+  try {
+    const testMessage = req.query.message || 'check my balance';
+    const command = await parseCommand(testMessage);
+    res.json({
+      message: testMessage,
+      detectedCommand: command,
+      timestamp: new Date().toISOString()
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Test endpoint for text generation approach
+app.get('/test-nlp-gen', async (req, res) => {
+  try {
+    const testMessage = req.query.message || 'check my balance';
+    const command = await parseCommandWithGeneration(testMessage);
+    res.json({
+      message: testMessage,
+      detectedCommand: command,
+      method: 'text-generation',
+      timestamp: new Date().toISOString()
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 

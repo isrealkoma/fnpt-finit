@@ -13,6 +13,7 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 const NLP_CLOUD_API_KEY = process.env.NLP_CLOUD_API_KEY;
 const NLP_CLOUD_MODEL = process.env.NLP_CLOUD_MODEL || 'distilbert-base-uncased-finetuned-sst-2-english';
 const NLP_CLOUD_BASE_URL = 'https://api.nlpcloud.io/v1';
+const NLP_CLOUD_STT_MODEL = process.env.NLP_CLOUD_STT_MODEL || 'whisper';
 
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
@@ -220,7 +221,70 @@ const getTimeOfDay = () => {
   return 'Good evening';
 };
 
-// Show help with more engaging content
+// Download WhatsApp media (audio files)
+const downloadWhatsAppMedia = async (mediaId) => {
+  try {
+    // Get media URL from WhatsApp
+    const mediaResponse = await axios.get(
+      `https://graph.facebook.com/v19.0/${mediaId}`,
+      {
+        headers: {
+          Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+        },
+      }
+    );
+
+    const mediaUrl = mediaResponse.data.url;
+
+    // Download the actual media file
+    const fileResponse = await axios.get(mediaUrl, {
+      headers: {
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+      },
+      responseType: 'arraybuffer',
+    });
+
+    return Buffer.from(fileResponse.data);
+  } catch (err) {
+    console.error('Media download error:', err.response?.data || err.message);
+    throw new Error('Failed to download audio file');
+  }
+};
+
+// Convert audio to text using NLP Cloud
+const speechToText = async (audioBuffer) => {
+  try {
+    console.log('Converting audio to text with NLP Cloud...');
+    
+    // Create FormData for file upload
+    const FormData = require('form-data');
+    const form = new FormData();
+    form.append('file', audioBuffer, {
+      filename: 'audio.ogg',
+      contentType: 'audio/ogg',
+    });
+
+    const response = await axios.post(
+      `${NLP_CLOUD_BASE_URL}/${NLP_CLOUD_STT_MODEL}/speech-to-text`,
+      form,
+      {
+        headers: {
+          'Authorization': `Token ${NLP_CLOUD_API_KEY}`,
+          ...form.getHeaders(),
+        },
+        timeout: 30000, // 30 second timeout for audio processing
+      }
+    );
+
+    const transcription = response.data.text;
+    console.log('Audio transcribed:', transcription);
+    
+    return transcription;
+  } catch (err) {
+    console.error('Speech-to-text error:', err.response?.data || err.message);
+    throw new Error('Failed to convert audio to text');
+  }
+};
 const showHelp = async (phone) => {
   await sendWhatsapp(phone, 
     `📱 *FanitePay Services Menu*\n\n` +
@@ -549,34 +613,4 @@ app.post('/whatsapp', async (req, res) => {
 // Health check endpoint for testing NLP Cloud connection
 app.get('/test-nlp', async (req, res) => {
   try {
-    const testMessage = req.query.message || 'check my balance';
-    const command = await parseCommand(testMessage);
-    res.json({
-      message: testMessage,
-      detectedCommand: command,
-      timestamp: new Date().toISOString()
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Test endpoint for text generation approach
-app.get('/test-nlp-gen', async (req, res) => {
-  try {
-    const testMessage = req.query.message || 'check my balance';
-    const command = await parseCommandWithGeneration(testMessage);
-    res.json({
-      message: testMessage,
-      detectedCommand: command,
-      method: 'text-generation',
-      timestamp: new Date().toISOString()
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Start server
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Fanitepay bot is running on port ${PORT}`));
+    const testMessage = req

@@ -19,6 +19,11 @@ const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 
+// EasyPay API Configuration
+const EASYPAY_USERNAME = process.env.EASYPAY_USERNAME || 'ff81a1c34a5affad';
+const EASYPAY_PASSWORD = process.env.EASYPAY_PASSWORD || '69af99b641a77cd2';
+const EASYPAY_API_URL = 'https://www.easypay.co.ug/api/';
+
 // Enhanced intent classification with market-ready labels
 const intentLabels = [
   'check account balance or wallet amount',
@@ -160,6 +165,16 @@ const getWalletBalance = async (user_id) => {
   return data?.balance ?? 0;
 };
 
+// Update wallet balance
+const updateWalletBalance = async (user_id, newBalance) => {
+  const { error } = await supabase
+    .from('wallets')
+    .update({ balance: newBalance })
+    .eq('user_id', user_id);
+  
+  if (error) throw error;
+};
+
 // Send OTP
 const sendOtp = async (phone) => {
   const otp = Math.floor(100000 + Math.random() * 900000).toString();
@@ -189,6 +204,149 @@ const verifyOtp = async (phone, code) => {
   return false;
 };
 
+// Process airtime purchase via EasyPay API
+const processAirtimePurchase = async (phone, provider, amount, user_id) => {
+  try {
+    // Check wallet balance first
+    const currentBalance = await getWalletBalance(user_id);
+    if (currentBalance < amount) {
+      throw new Error('INSUFFICIENT_BALANCE');
+    }
+
+    // Prepare data for the EasyPay API
+    const easyPayData = {
+      username: EASYPAY_USERNAME,
+      password: EASYPAY_PASSWORD,
+      action: 'paybill',
+      provider,
+      phone,
+      amount,
+      reference: "fntp" + Math.floor(Math.random() * 9000000000) + 1000000000
+    };
+
+    // Send request to the EasyPay API
+    const response = await axios.post(EASYPAY_API_URL, easyPayData, {
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 30000 // 30 second timeout
+    });
+
+    // Check if the request was successful
+    if (response.status !== 200) {
+      throw new Error('EASYPAY_API_ERROR');
+    }
+
+    const responseData = response.data;
+    
+    // Check if EasyPay response indicates success
+    // Note: You may need to adjust this based on EasyPay's actual response format
+    if (responseData.status === 'success' || responseData.success === true) {
+      // Deduct amount from wallet
+      await updateWalletBalance(user_id, currentBalance - amount);
+      
+      // Record transaction
+      await supabase.from('transactions').insert([
+        {
+          user_id,
+          type: 'airtime',
+          status: 'completed',
+          amount,
+          metadata: { 
+            provider, 
+            phone, 
+            reference: easyPayData.reference,
+            easypay_response: responseData 
+          },
+        },
+      ]);
+
+      return {
+        success: true,
+        reference: easyPayData.reference,
+        response: responseData
+      };
+    } else {
+      // EasyPay returned an error
+      throw new Error('EASYPAY_TRANSACTION_FAILED');
+    }
+
+  } catch (error) {
+    console.error('Airtime purchase error:', error);
+    
+    // Record failed transaction
+    await supabase.from('transactions').insert([
+      {
+        user_id,
+        type: 'airtime',
+        status: 'failed',
+        amount,
+        metadata: { 
+          provider, 
+          phone, 
+          error: error.message,
+          timestamp: new Date()
+        },
+      },
+    ]);
+
+    throw error;
+  }
+};
+
+// Show airtime purchase options
+const showAirtimeOptions = async (phone) => {
+  await sendWhatsapp(phone, 
+    `📱 *Airtime Purchase*\n\n` +
+    `Please choose your network provider:\n\n` +
+    `📶 *MTN* - Reply: MTN [amount] [phone]\n` +
+    `📶 *Airtel* - Reply: AIRTEL [amount] [phone]\n` +
+    `📶 *UTL* - Reply: UTL [amount] [phone]\n\n` +
+    `*Example:* MTN 5000 256701234567\n\n` +
+    `💡 *Or use simple format:*\n` +
+    `"Buy 10000 MTN airtime for 256701234567"\n\n` +
+    `_Phone number can be yours or someone else's_`
+  );
+};
+
+// Parse airtime request from message
+const parseAirtimeRequest = (message) => {
+  const normalized = message.trim().toUpperCase();
+  
+  // Pattern 1: "MTN 5000 256701234567"
+  const pattern1 = /^(MTN|AIRTEL|UTL)\s+(\d+)\s+(256\d{9})$/;
+  const match1 = normalized.match(pattern1);
+  if (match1) {
+    return {
+      provider: match1[1],
+      amount: parseInt(match1[2]),
+      phone: match1[3]
+    };
+  }
+
+  // Pattern 2: "Buy 5000 MTN airtime for 256701234567"
+  const pattern2 = /BUY\s+(\d+)\s+(MTN|AIRTEL|UTL)\s+AIRTIME\s+FOR\s+(256\d{9})/;
+  const match2 = normalized.match(pattern2);
+  if (match2) {
+    return {
+      provider: match2[2],
+      amount: parseInt(match2[1]),
+      phone: match2[3]
+    };
+  }
+
+  // Pattern 3: "5000 MTN 256701234567"
+  const pattern3 = /^(\d+)\s+(MTN|AIRTEL|UTL)\s+(256\d{9})$/;
+  const match3 = normalized.match(pattern3);
+  if (match3) {
+    return {
+      provider: match3[2],
+      amount: parseInt(match3[1]),
+      phone: match3[3]
+    };
+  }
+
+  return null;
+};
+
 // Welcome message with personalized greeting
 const showWelcome = async (phone, isFirstTime = false) => {
   const timeOfDay = getTimeOfDay();
@@ -205,10 +363,10 @@ const showWelcome = async (phone, isFirstTime = false) => {
       `🔄 Send money to friends & family\n` +
       `🏦 Access quick loans\n\n` +
       `Simply tell me what you need in your own words! 😊\n\n` +
-      `_Example: "Check my balance" or "Pay my water bill"_`
+      `_Example: "Check my balance" or "Buy MTN airtime"_`
     : `${timeOfDay}! Welcome back to *FanitePay* 👋\n\n` +
       `How can I help you today?\n\n` +
-      `💡 *Quick commands:* balance, pay water, buy airtime, transfer money, or just tell me what you need!`;
+      `💡 *Quick commands:* balance, airtime, pay water, transfer money, or just tell me what you need!`;
   
   await sendWhatsapp(phone, welcomeMessage);
 };
@@ -285,6 +443,7 @@ const speechToText = async (audioBuffer) => {
     throw new Error('Failed to convert audio to text');
   }
 };
+
 const showHelp = async (phone) => {
   await sendWhatsapp(phone, 
     `📱 *FanitePay Services Menu*\n\n` +
@@ -299,9 +458,9 @@ const showHelp = async (phone) => {
     `💬 *Just tell me what you need!*\n` +
     `You can say things like:\n` +
     `• "How much money do I have?"\n` +
-    `• "Pay my UMEME bill"\n` +
+    `• "Buy 5000 MTN airtime for 256701234567"\n` +
     `• "Send 50k to my friend"\n` +
-    `• "I need airtime"\n\n` +
+    `• "Pay my UMEME bill"\n\n` +
     `We're here 24/7 to help! 🌟`
   );
 };
@@ -312,6 +471,9 @@ const parseCommand = async (message) => {
 
   // Check if it's an OTP first
   if (/^\d{6}$/.test(normalized)) return 'otp';
+
+  // Check for airtime patterns
+  if (parseAirtimeRequest(message)) return 'airtime_direct';
 
   // Quick pattern matching for common phrases (90% of use cases)
   for (const [intent, patterns] of Object.entries(quickPatterns)) {
@@ -390,70 +552,8 @@ const parseCommand = async (message) => {
   }
 };
 
-// Alternative method using NLP Cloud's text generation for more complex intent parsing
-const parseCommandWithGeneration = async (message) => {
-  const normalized = message.trim();
-
-  // Check if it's an OTP first
-  if (/^\d{6}$/.test(normalized)) return 'otp';
-
-  try {
-    const prompt = `Classify this message into one of these fintech intents:
-- balance: check account balance
-- pay water: pay water bill
-- pay electricity: pay electricity bill  
-- pay tv: pay tv bill
-- airtime: buy airtime
-- top up: top up wallet
-- transfer: transfer money
-- loans: loan services
-- help: get help
-- none: if unclear
-
-Message: "${normalized}"
-Intent:`;
-
-    const response = await axios.post(
-      `${NLP_CLOUD_BASE_URL}/flan-alpaca-base/generation`,
-      {
-        text: prompt,
-        max_length: 10,
-        temperature: 0.1,
-        top_p: 0.9
-      },
-      {
-        headers: {
-          'Authorization': `Token ${NLP_CLOUD_API_KEY}`,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-
-    const generatedText = response.data.generated_text.trim().toLowerCase();
-    console.log('Generated intent:', generatedText);
-
-    // Map generated intent to command
-    const intentMap = {
-      'balance': 'balance',
-      'pay water': 'pay water',
-      'pay electricity': 'pay electricity',
-      'pay tv': 'pay tv',
-      'airtime': 'airtime',
-      'top up': 'top up',
-      'transfer': 'transfer',
-      'loans': 'loans',
-      'help': 'help',
-      'none': null
-    };
-
-    return intentMap[generatedText] || null;
-  } catch (err) {
-    console.error('NLP Cloud generation error:', err.response?.data || err.message);
-    return null;
-  }
-};
-
 const pendingActions = {};
+const airtimeRequests = {}; // Store pending airtime requests
 
 // WhatsApp webhook verification
 app.get('/whatsapp', (req, res) => {
@@ -508,8 +608,43 @@ app.post('/whatsapp', async (req, res) => {
     else if (command === 'loans') {
       await sendWhatsapp(phone, `🏦 *FanitePay Loans*\n\n💸 Quick loans are coming very soon! We're working hard to bring you the best rates and instant approval.\n\n🔔 You'll be the first to know when it's ready. Stay tuned! ⭐`);
     } 
-    // Handle services requiring OTP
-    else if (['pay water', 'pay electricity', 'pay tv', 'airtime', 'top up', 'transfer'].includes(command)) {
+    // Handle direct airtime requests (with phone, provider, amount parsed)
+    else if (command === 'airtime_direct') {
+      const airtimeDetails = parseAirtimeRequest(message);
+      if (airtimeDetails) {
+        const { provider, amount, phone: targetPhone } = airtimeDetails;
+        
+        // Validate amount (minimum 1000, maximum 100000)
+        if (amount < 1000 || amount > 100000) {
+          await sendWhatsapp(phone, 
+            `⚠️ *Invalid Amount*\n\n` +
+            `Airtime amount must be between UGX 1,000 and UGX 100,000.\n\n` +
+            `Please try again with a valid amount.`
+          );
+          return res.sendStatus(200);
+        }
+
+        // Store the airtime request
+        airtimeRequests[phone] = { provider, amount, phone: targetPhone };
+        pendingActions[phone] = 'airtime';
+        
+        await sendOtp(phone);
+        await sendWhatsapp(phone, 
+          `📱 *Airtime Purchase Confirmation*\n\n` +
+          `Provider: ${provider}\n` +
+          `Amount: UGX ${amount.toLocaleString()}\n` +
+          `Phone: ${targetPhone}\n\n` +
+          `🔐 Please enter the 6-digit OTP we just sent to verify this purchase.\n\n` +
+          `⏰ OTP expires in 5 minutes`
+        );
+      }
+    }
+    // Handle regular airtime requests (show options)
+    else if (command === 'airtime') {
+      await showAirtimeOptions(phone);
+    }
+    // Handle services requiring OTP (except direct airtime which is handled above)
+    else if (['pay water', 'pay electricity', 'pay tv', 'top up', 'transfer'].includes(command)) {
       pendingActions[phone] = command;
       await sendOtp(phone);
       
@@ -517,7 +652,6 @@ app.post('/whatsapp', async (req, res) => {
         'pay water': 'Water Bill Payment',
         'pay electricity': 'Electricity Bill Payment',
         'pay tv': 'TV Subscription Payment',
-        'airtime': 'Airtime Purchase',
         'top up': 'Wallet Top-up',
         'transfer': 'Money Transfer'
       };
@@ -536,81 +670,53 @@ app.post('/whatsapp', async (req, res) => {
         const action = pendingActions[phone];
         delete pendingActions[phone];
 
-        await supabase.from('transactions').insert([
-          {
-            user_id,
-            type: action,
-            status: 'completed',
-            amount: Math.floor(Math.random() * 50000) + 5000, // Random amount for demo
-            metadata: { description: `${action} transaction`, otp_verified: true },
-          },
-        ]);
+        if (action === 'airtime' && airtimeRequests[phone]) {
+          // Process real airtime purchase
+          const { provider, amount, phone: targetPhone } = airtimeRequests[phone];
+          delete airtimeRequests[phone];
 
-        const successMessages = {
-          'pay water': '💧 Water bill payment successful! Your NWSC account has been credited.',
-          'pay electricity': '⚡ Electricity bill paid! Your UMEME account is now up to date.',
-          'pay tv': '📺 TV subscription renewed! Enjoy your favorite shows.',
-          'airtime': '📱 Airtime purchase successful! Your phone is now topped up.',
-          'top up': '💵 Wallet top-up complete! Funds are now available in your account.',
-          'transfer': '🔄 Money transfer successful! Funds have been sent.'
-        };
+          try {
+            const result = await processAirtimePurchase(targetPhone, provider, amount, user_id);
+            
+            if (result.success) {
+              await sendWhatsapp(phone, 
+                `✅ *Airtime Purchase Successful*\n\n` +
+                `📱 ${provider} airtime of UGX ${amount.toLocaleString()} has been sent to ${targetPhone}\n\n` +
+                `📋 Reference: ${result.reference}\n\n` +
+                `💰 New wallet balance: UGX ${(await getWalletBalance(user_id)).toLocaleString()}\n\n` +
+                `Thank you for using FanitePay! 🌟`
+              );
+            }
+          } catch (error) {
+            let errorMessage = `❌ *Airtime Purchase Failed*\n\n`;
+            
+            if (error.message === 'INSUFFICIENT_BALANCE') {
+              const currentBalance = await getWalletBalance(user_id);
+              errorMessage += `Insufficient balance. You have UGX ${currentBalance.toLocaleString()} but need UGX ${amount.toLocaleString()}.\n\n` +
+                              `💡 Top up your wallet and try again.`;
+            } else if (error.message === 'EASYPAY_API_ERROR' || error.message === 'EASYPAY_TRANSACTION_FAILED') {
+              errorMessage += `There was an issue processing your airtime purchase. Please try again in a few minutes.\n\n` +
+                              `If the problem persists, contact our support team.`;
+            } else {
+              errorMessage += `An unexpected error occurred. Please try again later.\n\n` +
+                              `If you continue to experience issues, contact our support team.`;
+            }
+            
+            await sendWhatsapp(phone, errorMessage);
+          }
+        } else {
+          // Handle other services (existing logic)
+          await supabase.from('transactions').insert([
+            {
+              user_id,
+              type: action,
+              status: 'completed',
+              amount: Math.floor(Math.random() * 50000) + 5000, // Random amount for demo
+              metadata: { description: `${action} transaction`, otp_verified: true },
+            },
+          ]);
 
-        await sendWhatsapp(phone, 
-          `✅ *Transaction Successful*\n\n` +
-          `${successMessages[action]}\n\n` +
-          `📱 Thank you for using FanitePay! 🌟`
-        );
-      } else {
-        await sendWhatsapp(phone, 
-          `❌ *Invalid OTP*\n\n` +
-          `The code you entered is incorrect or has expired.\n\n` +
-          `💡 Please try your transaction again to get a new OTP, or type "help" if you need assistance.`
-        );
-      }
-    } 
-    // Handle unknown commands with helpful suggestions
-    else {
-      const suggestions = [
-        'check my balance',
-        'pay water bill',
-        'buy airtime',
-        'send money',
-        'help'
-      ];
-      
-      await sendWhatsapp(phone, 
-        `🤔 *I didn't quite understand that*\n\n` +
-        `No worries! Try saying something like:\n` +
-        `${suggestions.map(s => `• "${s}"`).join('\n')}\n\n` +
-        `💬 You can also type "help" to see all available services.\n\n` +
-        `*FanitePay* - Making financial services simple! 🚀`
-      );
-    }
-
-    res.sendStatus(200);
-  } catch (err) {
-    console.error('Webhook error:', err);
-    
-    // Send user-friendly error message
-    try {
-      const phone = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.from;
-      if (phone) {
-        await sendWhatsapp(phone, 
-          `🔧 *Oops! Something went wrong*\n\n` +
-          `We're experiencing a temporary issue. Please try again in a moment.\n\n` +
-          `If the problem persists, type "help" or contact our support team.\n\n` +
-          `Thank you for your patience! 🙏`
-        );
-      }
-    } catch (sendErr) {
-      console.error('Failed to send error message:', sendErr);
-    }
-    
-    res.sendStatus(500);
-  }
-});
-
-// Health check endpoint for testing NLP Cloud connection
-app.get('/test-nlp', async (req, res) => {
-  try {
-    const testMessage = req
+          const successMessages = {
+            'pay water': '💧 Water bill payment successful! Your NWSC account has been credited.',
+            'pay electricity': '⚡ Electricity bill paid! Your UMEME account is now up to date.',
+            'pay tv': '📺

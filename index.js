@@ -20,8 +20,8 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 
 // EasyPay API Configuration
-const EASYPAY_USERNAME = process.env.EASYPAY_USERNAME || 'ff81a1c34a5affad';
-const EASYPAY_PASSWORD = process.env.EASYPAY_PASSWORD || '69af99b641a77cd2';
+const EASYPAY_USERNAME = process.env.EASYPAY_USERNAME;
+const EASYPAY_PASSWORD = process.env.EASYPAY_PASSWORD;
 const EASYPAY_API_URL = 'https://www.easypay.co.ug/api/';
 
 // Enhanced intent classification with market-ready labels

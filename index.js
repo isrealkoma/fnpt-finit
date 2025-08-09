@@ -719,4 +719,190 @@ app.post('/whatsapp', async (req, res) => {
           const successMessages = {
             'pay water': '💧 Water bill payment successful! Your NWSC account has been credited.',
             'pay electricity': '⚡ Electricity bill paid! Your UMEME account is now up to date.',
-            'pay tv': '📺
+            'pay tv': '📺 TV subscription renewed! Enjoy your favorite shows.',
+            'top up': '💵 Wallet top-up complete! Funds are now available in your account.',
+            'transfer': '🔄 Money transfer successful! Funds have been sent.'
+          };
+
+          await sendWhatsapp(phone, 
+            `✅ *Transaction Successful*\n\n` +
+            `${successMessages[action]}\n\n` +
+            `📱 Thank you for using FanitePay! 🌟`
+          );
+        }
+      } else {
+        // Clear any pending airtime requests on invalid OTP
+        if (airtimeRequests[phone]) {
+          delete airtimeRequests[phone];
+        }
+        
+        await sendWhatsapp(phone, 
+          `❌ *Invalid OTP*\n\n` +
+          `The code you entered is incorrect or has expired.\n\n` +
+          `💡 Please try your transaction again to get a new OTP, or type "help" if you need assistance.`
+        );
+      }
+    } 
+    // Handle cancel requests
+    else if (message.toLowerCase().trim() === 'cancel') {
+      if (pendingActions[phone] || airtimeRequests[phone]) {
+        delete pendingActions[phone];
+        delete airtimeRequests[phone];
+        
+        await sendWhatsapp(phone, 
+          `🚫 *Transaction Cancelled*\n\n` +
+          `Your transaction has been cancelled successfully.\n\n` +
+          `How else can I help you today? 😊`
+        );
+      } else {
+        await sendWhatsapp(phone, 
+          `ℹ️ No active transaction to cancel.\n\n` +
+          `How can I help you today?`
+        );
+      }
+    }
+    // Handle unknown commands with helpful suggestions
+    else {
+      const suggestions = [
+        'check my balance',
+        'buy MTN airtime',
+        'pay water bill',
+        'send money',
+        'help'
+      ];
+      
+      await sendWhatsapp(phone, 
+        `🤔 *I didn't quite understand that*\n\n` +
+        `No worries! Try saying something like:\n` +
+        `${suggestions.map(s => `• "${s}"`).join('\n')}\n\n` +
+        `💬 You can also type "help" to see all available services.\n\n` +
+        `*For airtime:* Use format like "MTN 5000 256701234567"\n\n` +
+        `*FanitePay* - Making financial services simple! 🚀`
+      );
+    }
+
+    res.sendStatus(200);
+  } catch (err) {
+    console.error('Webhook error:', err);
+    
+    // Send user-friendly error message
+    try {
+      const phone = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.from;
+      if (phone) {
+        // Clean up any pending requests on error
+        delete pendingActions[phone];
+        delete airtimeRequests[phone];
+        
+        await sendWhatsapp(phone, 
+          `🔧 *Oops! Something went wrong*\n\n` +
+          `We're experiencing a temporary issue. Please try again in a moment.\n\n` +
+          `If the problem persists, type "help" or contact our support team.\n\n` +
+          `Thank you for your patience! 🙏`
+        );
+      }
+    } catch (sendErr) {
+      console.error('Failed to send error message:', sendErr);
+    }
+    
+    res.sendStatus(500);
+  }
+});
+
+// Standalone airtime endpoint (for API access)
+app.post('/airtime', async (req, res) => {
+  const { phone, provider, amount } = req.body;
+  
+  // Validate required fields
+  const requiredFields = ['phone', 'provider', 'amount'];
+  for (const field of requiredFields) {
+    if (!req.body[field]) {
+      return res.status(400).json({ error: `Missing field: ${field}` });
+    }
+  }
+  
+  try {
+    // Prepare data for the EasyPay API
+    const easyPayData = {
+      username: EASYPAY_USERNAME,
+      password: EASYPAY_PASSWORD,
+      action: 'paybill',
+      provider,
+      phone,
+      amount,
+      reference: "fntp" + Math.floor(Math.random() * 9000000000) + 1000000000
+    };
+    
+    // Send request to the EasyPay API
+    const response = await axios.post(EASYPAY_API_URL, easyPayData, {
+      headers: { 'Content-Type': 'application/json' }
+    });
+    
+    // Check if the request was successful
+    if (response.status !== 200) {
+      return res.status(response.status).json({ error: 'Failed to send request to EasyPay API' });
+    }
+    
+    // Echo back the response from the EasyPay API as the response to the initial request
+    return res.status(200).json(response.data);
+  } catch (error) {
+    console.error('Standalone airtime error:', error);
+    return res.status(500).json({ error: 'Failed to process airtime transaction request' });
+  }
+});
+
+// Health check endpoint for testing NLP Cloud connection
+app.get('/test-nlp', async (req, res) => {
+  try {
+    const testMessage = req.query.message || 'check my balance';
+    
+    const response = await axios.post(
+      `${NLP_CLOUD_BASE_URL}/bart-large-mnli/classification`,
+      {
+        text: testMessage,
+        labels: intentLabels,
+        multi_class: false
+      },
+      {
+        headers: {
+          'Authorization': `Token ${NLP_CLOUD_API_KEY}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    res.json({
+      message: testMessage,
+      classification: response.data,
+      parsedCommand: await parseCommand(testMessage)
+    });
+  } catch (error) {
+    console.error('NLP test error:', error);
+    res.status(500).json({ error: 'NLP Cloud test failed', details: error.message });
+  }
+});
+
+// Test airtime parsing endpoint
+app.get('/test-airtime-parse', (req, res) => {
+  const testMessages = [
+    'MTN 5000 256701234567',
+    'Buy 10000 AIRTEL airtime for 256709876543',
+    '15000 UTL 256701234567',
+    'airtel 20000 256701234567',
+    'invalid message'
+  ];
+
+  const results = testMessages.map(message => ({
+    message,
+    parsed: parseAirtimeRequest(message)
+  }));
+
+  res.json(results);
+});
+
+// Start server
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`🚀 FanitePay WhatsApp Bot running on port ${PORT}`);
+  console.log(`📱 Webhook URL: ${process.env.BASE_URL || 'http://localhost:' + PORT}/whatsapp`);
+  console.log(`🔧 Health check: ${process.env.BASE_URL || 'http://localhost:' + PORT}/test-nlp`);
+});

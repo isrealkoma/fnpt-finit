@@ -175,14 +175,47 @@ const updateWalletBalance = async (user_id, newBalance) => {
   if (error) throw error;
 };
 
-// Send OTP
+// Send OTP via SMS API
 const sendOtp = async (phone) => {
   const otp = Math.floor(100000 + Math.random() * 900000).toString();
+  
+  // Store OTP in database
   await supabase
     .from('otps')
     .upsert({ phone, otp, verified: false, created_at: new Date() });
 
-  await sendWhatsapp(phone, `🔐 Your Fanitepay OTP is: ${otp}`);
+  // Send OTP via SMS API
+  const otppayload = {
+    user: {
+      username: 'isaacngabwali',
+      password: 'Admin@Sys'
+    },
+    messages: [
+      {
+        numbers: [ phone ],
+        senderid: "FANITEOTP",
+        'message-body': "Your FanitePay OTP code is " + otp
+      }
+    ]
+  };
+
+  try {
+    const response = await axios.post('http://sms.blueglobalit.com/api/json/messages/jsonMessagesService', otppayload, {
+      headers: { 'Content-Type': 'application/json' }
+    });
+    
+    console.log('OTP SMS sent successfully:', response.data);
+    
+    // Also send confirmation via WhatsApp
+    await sendWhatsapp(phone, `🔐 *OTP Sent*\n\nWe've sent a 6-digit verification code to your phone via SMS.\n\nPlease check your messages and enter the code to continue. 📱`);
+    
+  } catch (error) {
+    console.error('SMS API error:', error.response?.data || error.message);
+    
+    // Fallback to WhatsApp if SMS fails
+    console.log('Falling back to WhatsApp for OTP delivery');
+    await sendWhatsapp(phone, `🔐 Your FanitePay OTP is: ${otp}\n\n⚠️ SMS service temporarily unavailable, so we sent it via WhatsApp instead.`);
+  }
 };
 
 // Verify OTP
